@@ -1,0 +1,5 @@
+[all]
+localhost  #keep the sequence as it is
+172.72.89.90  # any value as per your env as my keycloak container running on second hosts hence I am running the role against second vm only
+192.168.10.10
+

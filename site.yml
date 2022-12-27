@@ -1,0 +1,13 @@
+---
+- name: Keycloak Password Rese and Secret Settings
+  hosts: all
+  strategy: free
+  gather_facts: false
+  serial: 1
+  vars_files:
+      - vars/keycloak_para.yml
+
+  roles:
+    - role: Keycloak
+      host_group: "{{ groups['all'] }}"      
+    

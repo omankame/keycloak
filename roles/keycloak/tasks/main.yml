@@ -1,0 +1,385 @@
+---
+
+- name: Creating Keycloak Realm Via ANsible
+  block:
+     - name: Gather facts from Ubuntu Machine
+       ansible.builtin.setup: 
+       delegate_to: "{{item}}"
+       delegate_facts: true
+       loop:
+         - "{{groups['all'].1}}"
+       register: ubu_ip
+
+     - name: o debug    #  IP ADDRESS COLLECTION
+       debug:
+         var: ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address
+
+
+     - name: Removing the lines in /etc/environment file for temporary  # very crucial as Proxy present hence need to remove it for temporary
+       lineinfile: 
+             path: /etc/environment
+             state: absent 
+             line: "{{item}}"
+       with_items:  
+            - https_proxy=http://apac.abc.xyz.com:9480
+            - http_proxy=http://apac.abc.xyz.com:9480
+
+     - name: Uset the proxy first
+       shell: |
+          unset http_proxy
+          unset https_proxy
+
+
+     - name: Setting token Life from 1 Minutes to 15 Minutes, by default it is 1 minute valid  # by default admin_cli need to change settings for 15 minute or whatever you want
+       local_action: 
+             module: keycloak_client
+             auth_client_id: admin_cli
+             auth_keycloak_url: http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth
+             auth_realm: master  #vimp keep master as we are authenticating via master only
+             auth_username: admin
+             auth_password: admin
+             state: present
+             realm: Master   # need to defined under which realm client create 
+             cliet_id: admin_cli  
+             attributes: 
+                   access.token.lifespan: 600
+                   client.session.idle.timeout: 600
+                   client.session.max.lifespan: 600
+                   client.offline.session.idle.timeout: 600
+                   client.offline.session.max.lifespan: 600
+
+     - name: Generate Keycloak auth token  
+       ansible.builtin.uri:
+            url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/realms/master/protocol/openid-connect/token"
+            method: POST
+            body: "client_id=admin_cli&username=admin&password=admin&grant_type=password"
+       no_log: false
+       register: keycloak_auth_response
+
+
+     - name: Display keycloak_auth_response
+       debug:
+         var: keycloak_auth_response
+
+     - name: "Determine if realm exists"
+       ansible.builtin.uri:
+          url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}"
+          method: GET 
+          status_code: 
+              - 200
+              - 404
+          headers:
+            Accept: "application/json"
+            Authorization: "Bearer {{ keycloak_auth_response.json.access_token}}"
+       register: keycloak_realm_exists
+
+     - name: Create Realm
+       ansible.builtin.uri: 
+          url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms"
+          method: POST
+          body: "{{ lookup('template', 'realm.json.j2') }}"
+          validate_certs: no
+          body_format: json 
+          headers: 
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+          status_code: 201
+       when: keycloak_realm_exists.status == 404
+
+     - name: Create Role for "PF" realm as (pf-users) # as already exixts
+       ansible.builtin.uri:
+          url: http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/roles
+          method: POST
+          body: '{"name":"{{ROLE}}"}'
+          body_format: json
+          headers: 
+              Accept: "application/json"
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+          status_code: 201
+       register: keycloak_role
+
+     - name: o role debug 
+       debug: 
+         var: keycloak_role
+
+     - name: Create client "pf-backend" in Realm "PF"
+       local_action: 
+            module: keycloak_client
+            auth_client_id: admin_cli
+            auth_keycloak_url: http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth
+            auth_realm: master  # keep master only as we are authenticating via master only
+            auth_username: admin
+            auth_password: admin
+            state: present
+            realm: "{{KEYCLOAK_REALM}}" #under which realm need to create client
+            cliet_id: "{{CLIENT_NAME}}"
+            description: "pf-backend client" # client protocol and access type by default openid-connect and confidential we want
+            enabled: True 
+            root_url: http://abc.com #in our case windows machine where keycloak db and IIS is running
+            redirect_uris: 
+                 - https://abc.com
+                 - http://abc.com
+            web_origins:
+                 - https://abc.com
+                 - http://abc.com
+            direct_access_grants_enabled: True
+            standard_flow_enabled: True
+            client_authenticator_type: client-secret   
+            default_roles: 
+                 - pf-users                                           
+            attributes:
+                access.token.lifespan: 1440   #its one day for PF realm ps
+                client.session.idle.timeout: 1440
+                client.session.max.lifespan: 1440
+                client.offline.session.idle.timeout: 1440
+                client.offline.session.max.lifespan: 1440
+       register: client_code
+
+     - name: client value
+       debug:
+         var: client_code.end_state.id
+
+     - name: Regenerating the secret for "pf-backend"
+       ansible.builtin.uri: 
+          url: http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/clients/{{client_code.end_state.id}}/client-secret"
+          method: POST
+          headers:
+            Accept: "application/json"
+            Authorization: "Bearer {{keycloak_auth_response.json.access_token }}"
+       register: pf_backend_regenerated_secret
+
+     - name: o devu 
+       debug:
+         var: client_code.end_state.id
+
+     - name: Add role "pf-users" i client "pf-backend"
+       ansible.builtin.uri:
+          url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/clients/{{client_code.end_state.id}}/roles"
+          method: POST
+          body: '{"name":"pf-users"}'
+          body_format: json
+          status_code: 201
+          headers:
+            Accept: "application/json"
+            Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+
+     #  
+     - name: "Create User"                                         
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users"
+           method: POST
+           body: 
+              enabled: true
+              username: "{{use1username}}"
+              firstName: "{{user1firstName | default(omit) }}"
+              lastName: "{{user1lastName | default(omit) }}"
+           validate_certs: no
+           body_format: json
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+           status_code: 201
+
+     - name: "Get User Administartor"
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users?username={{ user1firstName }}"
+           validate_certs: no
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+       register: keycloak_user1 
+
+     - name: "Update User Password for Administartor"
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/{{ (keycloak_user1.json | first).id }}/reset-password"
+           method: PUT
+           body: 
+             type: password
+             temporary: false         
+             value: "{{ user1password }}"
+           validate_certs: no
+           body_format: json
+           status_code:
+               - 200
+               - 204
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+       register: keycloak_user1            
+
+     - name: "Create user admin"
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users"
+           method: POST
+           body: 
+              enabled: true
+              username: "{{use2username}}"
+              firstName: "{{user2firstName | default(omit) }}"
+              lastName: "{{user2lastName | default(omit) }}"
+           validate_certs: no
+           body_format: json
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+           status_code: 201  
+
+     - name: "Get User admin"
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users?username={{ user2firstName }}"
+           validate_certs: no
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+       register: keycloak_user2
+
+     - name: "Update User Password for Admin" 
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/{{ (keycloak_user2.json | first).id }}/reset-password"
+           method: PUT
+           body: 
+             type: password
+             temporary: false         
+             value: "{{ user2password }}"
+           validate_certs: no
+           body_format: json
+           status_code:
+               - 200
+               - 204
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+       register: keycloak_user2          
+
+    # - name: Generate keycloak auth token #valid for 1 minutes remember but we have changed to 10 minutes hence these block can be commented.
+    #   ansible.builtin.uri:
+    #       url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/realms/master/protocol/openid-connect/token"    
+    #       method: POST
+    #       body: "client_id=admin_cli&username=admin&password=admin&grant_type=password"  
+    #   no_log: false    
+    #   register: keycloak_auth_response_second
+
+     - name: Get the id of "pf-user" role client role
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/clients/{{client_code.end_state.id}}/roles/{{ROLE}}"
+           method: GET
+           validate_certs: no
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+           register: keycloak_role
+
+     - name: checking role value 
+       debug:
+         var: keycloak_role
+
+     - name: Get Users information
+       ansible.builtin.uri:
+          url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/"
+          method: GET
+          headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+       register: keycloak_user 
+
+     - name: debug user
+       debug: 
+         var: keycloak_user  # keycloak_user.json[0].id(admin) keycloak_user.json[1].id(administartor)
+
+     - name: "Add Administrator user to Realm Role"
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/{{keycloak_user.json[0].id}}/role-mappings/clients/{{client_code.end_state.id}}"   
+           method: POST    
+           body: 
+              - id: "{{ keycloak_role.json.id }}"
+                name: pf-users
+                coposite: false
+                clientRole: true
+                containerId: "{{ client_code.end_state.id }}"
+           body_format: json
+           validate_certs: no
+           status_code:
+                 - 204
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}" 
+
+     - name: "Add Admin user to Realm Role" 
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/{{keycloak_user.json[1].id}}/role-mappings/clients/{{client_code.end_state.id}}"   
+           method: POST    
+           body: 
+              - id: "{{ keycloak_role.json.id }}"
+                name: pf-users
+                coposite: false
+                clientRole: true
+                containerId: "{{ client_code.end_state.id }}"
+           body_format: json
+           validate_certs: no
+           status_code:
+                 - 204
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"                    
+
+     - name: Get the Role id, as two types of role Realm and Client
+       ansible.builtin.uri:
+          url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/roles/"
+          method: GET        
+          headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+       register: keycloak_realm_role
+
+     - name: Debug Realm Role 
+       debug:
+         var: keycloak_realm_role
+
+     - name: copy the jar result to json file
+       local_action: copy content={{ keycloak_realm_role.json }} dest=roles/keycloak/files/realm_role.json
+       when: keycloak_realm_role | lenghth > 0
+
+     - name: Role id
+       local_action: 
+            module: shell
+               /usr/bin/python3.8 /home/onkar/keycloak/roles/keyclok/files/id.py --json  /home/onkar/keycloak/roles/keyclok/files/realm_role.json
+       register: realm_roleid
+       when: keycloak_realm_role | lenghth > 0
+
+     - name: debug checking 
+       debug:
+        var: realm_roleid
+
+     - name: Add Realm Role to user Administrator
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/{{keycloak_user.json[0].id}}/role-mappings/realm"   
+           method: POST                                              
+           body: 
+            - id: "{{ realm_roleid.stdout}}"
+              name: pf-users
+           body_format: json
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+           status_code: 204 
+
+     - name: Add Realm Role to user admin
+       ansible.builtin.uri:
+           url: "http://{{ubu_ip.results[0].ansible_facts.ansible_default_ipv4.address}}:8090/auth/admin/realms/{{KEYCLOAK_REALM}}/users/{{keycloak_user.json[1].id}}/role-mappings/realm"   
+           method: POST                                              
+           body: 
+            - id: "{{ realm_roleid.stdout}}"
+              name: pf-users
+           body_format: json
+           headers:
+              Authorization: "Bearer {{ keycloak_auth_response.json.access_token }}"
+           status_code: 204       
+     
+     - name: Replace value in file
+       lineinfile: 
+           dest: /home/onkar/keycloak/vars/secrets.yml
+           regexp: 'KEYCLOAK_CLIENT_SECRET_PF'
+           line: 'KEYCLOAK_CLIENT_SECRET_PF: {{ pf_backend_regenerated_secret.json.value}}'
+       delegate_to: localhost
+
+     - name: Adding again lines in /etc/environment file for temporary
+       lineinfile: 
+             path: /etc/environment
+             state: present
+             line: "{{item}}"
+       with_items:  
+            - https_proxy=http://apac.abc.xyz.com:9480
+            - http_proxy=http://apac.abc.xyz.com:9480    
+
+     - name: Uset the proxy first
+       shell: |
+          export https_proxy=http://apac.abc.xyz.com:9480 
+          export http_proxy=http://apac.abc.xyz.com:9480
+
+  when: inventory_hostname == host_group[1]               
