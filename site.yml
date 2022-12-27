@@ -6,6 +6,7 @@
   serial: 1
   vars_files:
       - vars/keycloak_para.yml
+      - vars/secrets.yml
 
   roles:
     - role: Keycloak
