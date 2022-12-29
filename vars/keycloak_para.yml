@@ -2,18 +2,18 @@
 
 # Keycloak Parameters
 KEYCLOAK_REALM: PF  #case sensitive value
-KEYCLOAK_USERNAME: admin
+KEYCLOAK_USERNAME: admin    # default value admin, admin nd admin-cli
 KEYCLOAK_PASSWORD: admin
 keycloak_auth_client: admin-cli  #admin-cli  
 ROLE: 'pf-users'
 CLIENT_NAME: 'pf-backend'
 
-user1username: administartor
+user1username: administartor  # value for pf realm and  pf-backend
 user1firstName: administartor
 user1lastName: administartor
 user1password: administartor
 
-user2username: admin
+user2username: admin   # value for pf realm and  pf-backend
 user2firstName: admin 
 user2lastName: admin
 user2password: admin 
